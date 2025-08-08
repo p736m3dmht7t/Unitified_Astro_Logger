@@ -1,6 +1,7 @@
-# unified_astro_logger.py (v14)
+# unified_astro_logger.py (v15)
 #
 # Changelog:
+# - During calibration, flags pixels that were saturated (>=65504) in the raw image by setting them to 65535 in the calibrated image.
 # - Adds Pegasus PPB Advance dew heater power logging (via PEGASUS_PPBA_API_URL).
 # - Adds an external shutdown mechanism via a flag file (configured by SHUTDOWN_FLAG_FILE).
 # - Full-featured, robust logger with API integration and real-time image processing.
@@ -499,6 +500,12 @@ class ImageFileHandler(FileSystemEventHandler):
                 image_header = hdul[0].header
                 original_dtype = hdul[0].data.dtype
             
+            # Identify saturated pixels in the raw image BEFORE any calibration.
+            saturated_mask = image_data >= 65504
+            num_saturated = np.sum(saturated_mask)
+            if num_saturated > 0:
+                logging.info(f"Detected {num_saturated} saturated pixels (>=65504) in raw image {image_path.name}.")
+
             dark_data = fits.getdata(dark_path).astype(np.float32)
             flat_data = fits.getdata(flat_path).astype(np.float32)
 
@@ -514,6 +521,10 @@ class ImageFileHandler(FileSystemEventHandler):
             normalized_flat = flat_data / flat_mean
             
             calibrated_data = dark_subtracted / normalized_flat
+            
+            # After calibration, set the originally saturated pixels to 65535.
+            if num_saturated > 0:
+                calibrated_data[saturated_mask] = 65535
 
             info = np.iinfo(original_dtype)
             clipped_data = np.clip(calibrated_data, info.min, info.max).astype(original_dtype)
@@ -521,6 +532,9 @@ class ImageFileHandler(FileSystemEventHandler):
             image_header['CALSTAT'] = 'BDF'
             image_header.add_history(f"Calibrated with Dark: {dark_path.name}")
             image_header.add_history(f"Calibrated with Flat: {flat_path.name}")
+            image_header['OBSERVAT'] = ('SFRO', 'Starfront Remote Observatory, Rockwood, TX')
+            if num_saturated > 0:
+                image_header.add_history(f"Flagged {num_saturated} saturated pixels (>=65504) as 65535.")
             
             new_file_path = image_path.with_stem(f"{image_path.stem}_calibrated")
             fits.PrimaryHDU(data=clipped_data, header=image_header).writeto(new_file_path, overwrite=True)

@@ -1,6 +1,12 @@
-# unified_astro_logger.py (v14)
+# unified_astro_logger.py (v16)
 #
 # Changelog:
+# - Adds robust roof status monitoring.
+# - Copies ROOF_STATUS_SOURCE_PATH to ROOF_STATUS_DEST_PATH periodically.
+# - If source is unavailable, uses astroplan to check sun elevation.
+# - If sun is > 5 deg high, forces local status file to 'CLOSED' as a failsafe.
+# - Logs roof status as OPEN, CLOSED, STALE (unavailable), or SUN_UP (failsafe active).
+# - During calibration, flags pixels that were saturated (>=65504) in the raw image by setting them to 65535 in the calibrated image.
 # - Adds Pegasus PPB Advance dew heater power logging (via PEGASUS_PPBA_API_URL).
 # - Adds an external shutdown mechanism via a flag file (configured by SHUTDOWN_FLAG_FILE).
 # - Full-featured, robust logger with API integration and real-time image processing.
@@ -35,6 +41,11 @@ from astropy.io import fits
 from tenacity import retry, stop_after_attempt, wait_fixed
 from timezonefinder import TimezoneFinder
 import numpy as np
+from astroplan import Observer as AstroplanObserver
+from astropy.coordinates import EarthLocation
+from astropy.time import Time
+import astropy.units as u
+
 
 load_dotenv()
 LOG_LEVELS = {'DEBUG': logging.DEBUG, 'INFO': logging.INFO, 'WARNING': logging.WARNING, 'ERROR': logging.ERROR}
@@ -48,6 +59,18 @@ class UnifiedAstroLogger:
         self.session_csv_lock = threading.Lock()
         self.focus_csv_lock = threading.Lock()
         self._load_config()
+
+        # Initialize location-based objects once for efficiency
+        self.tf = TimezoneFinder()
+        try:
+            self.observer_location = EarthLocation.from_geodetic(
+                lon=self.config["LONGITUDE"] * u.deg,
+                lat=self.config["LATITUDE"] * u.deg
+            )
+            self.astro_observer = AstroplanObserver(location=self.observer_location)
+        except Exception as e:
+            raise ValueError(f"Could not initialize Astroplan Observer. Check LATITUDE/LONGITUDE. Error: {e}")
+
         self.astro_date_str = self._get_astronomical_date_str()
         self._resolve_dynamic_paths()
         self._initialize_csv(self.config["SESSION_LOG_FILE"], ["TimestampUTC", "EventType", "Status", "Message", "DetailsJSON"], self.session_csv_lock)
@@ -62,7 +85,8 @@ class UnifiedAstroLogger:
         required_strings = ["SESSION_LOG_DIR", "FOCUS_LOG_FILE", "IMAGE_BASE_DIR", "OPENWEATHERMAP_API_KEY"]
         optional_strings = ["NINA_LOG_DIR", "BOLTWOOD_FILE_PATH", "MASTER_DARK_DIR", "MASTER_FLAT_DIR",
                             "ASTAP_CLI_PATH", "PEGASUS_API_URL", "PEGASUS_DEVICEMANAGER_URL",
-                            "PEGASUS_PPBA_API_URL", "SHUTDOWN_FLAG_FILE"]
+                            "PEGASUS_PPBA_API_URL", "SHUTDOWN_FLAG_FILE", "ROOF_STATUS_SOURCE_PATH",
+                            "ROOF_STATUS_DEST_PATH"]
         required_floats = ["LATITUDE", "LONGITUDE", "CCD_TEMP_TOLERANCE"]
         required_ints = ["PERIODIC_LOG_INTERVAL_SEC", "FILE_WRITE_DELAY_SEC"]
 
@@ -84,8 +108,7 @@ class UnifiedAstroLogger:
             self.config[key] = int(value)
             
     def _get_astronomical_date_str(self):
-        tf = TimezoneFinder()
-        tz_str = tf.timezone_at(lat=self.config["LATITUDE"], lng=self.config["LONGITUDE"])
+        tz_str = self.tf.timezone_at(lat=self.config["LATITUDE"], lng=self.config["LONGITUDE"])
         now_local = datetime.datetime.now(pytz.utc).astimezone(pytz.timezone(tz_str))
         if now_local.hour < 12:
             return (now_local - datetime.timedelta(days=1)).date().strftime('%Y-%m-%d')
@@ -102,7 +125,8 @@ class UnifiedAstroLogger:
         self.config["SESSION_LOG_FILE"].parent.mkdir(parents=True, exist_ok=True)
         
         for key in ["FOCUS_LOG_FILE", "IMAGE_BASE_DIR", "NINA_LOG_DIR", "BOLTWOOD_FILE_PATH", 
-                    "MASTER_DARK_DIR", "MASTER_FLAT_DIR", "SHUTDOWN_FLAG_FILE"]:
+                    "MASTER_DARK_DIR", "MASTER_FLAT_DIR", "SHUTDOWN_FLAG_FILE", 
+                    "ROOF_STATUS_SOURCE_PATH", "ROOF_STATUS_DEST_PATH"]:
             if self.config.get(key):
                 self.config[key] = Path(self.config[key])
 
@@ -118,7 +142,7 @@ class UnifiedAstroLogger:
     def _write_to_csv(self, file_path, row, lock):
         with lock:
             try:
-                with open(file_path, 'a', newline='', encoding='utf--8') as f:
+                with open(file_path, 'a', newline='', encoding='utf-8') as f:
                     csv.writer(f).writerow(row)
             except Exception as e:
                 logging.error(f"FATAL: Could not write to CSV file {file_path}! {e}")
@@ -246,6 +270,65 @@ class UnifiedAstroLogger:
             logging.warning(f"Could not get OpenWeatherMap data: {e}")
             return {}
 
+    def _check_roof_status(self):
+        """Checks roof status, copies file, and applies failsafe logic if source is unavailable."""
+        source_path = self.config.get("ROOF_STATUS_SOURCE_PATH")
+        dest_path = self.config.get("ROOF_STATUS_DEST_PATH")
+
+        if not source_path or not dest_path:
+            return  # Silently skip if not configured
+
+        try:
+            # Attempt to read the source file from the network
+            with open(source_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            # If successful, write the exact content to the destination
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(dest_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+
+            # Parse the status from the content and log it
+            roof_status = "UNKNOWN"
+            if "CLOSED" in content.upper():
+                roof_status = "CLOSED"
+            elif "OPEN" in content.upper():
+                roof_status = "OPEN"
+            
+            self.log_session_event("ROOF_STATUS_UPDATE", roof_status, "Successfully updated roof status from source.", {"source": str(source_path), "content": content.strip()})
+
+        except (IOError, OSError) as e:
+            # This block executes if the source file is inaccessible (e.g., network error)
+            logging.warning(f"Could not access roof status file at {source_path}: {e}")
+            self.log_session_event("ROOF_STATUS_UPDATE", "STALE", f"Could not access source roof status file: {e}", {"source": str(source_path)})
+
+            # Failsafe: Check sun's position
+            now = Time.now()
+            sun_alt = self.astro_observer.sun_alt(now).to(u.deg)
+            
+            if sun_alt.value > 5:
+                logging.warning(f"Sun is up ({sun_alt:.2f}). Forcing roof status to CLOSED at destination as a failsafe.")
+                self.log_session_event("ROOF_STATUS_UPDATE", "SUN_UP", f"Source stale, sun up ({sun_alt:.2f}). Forcing destination to CLOSED.", {"destination": str(dest_path)})
+                
+                try:
+                    # Construct the standard "CLOSED" content with the current local time
+                    tz_str = self.tf.timezone_at(lat=self.config["LATITUDE"], lng=self.config["LONGITUDE"])
+                    local_tz = pytz.timezone(tz_str)
+                    now_local = datetime.datetime.now(pytz.utc).astimezone(local_tz)
+                    timestamp_str = now_local.strftime('%Y-%m-%d %I:%M:%S%p') # e.g., 2025-08-08 08:09:44AM
+                    new_content = f"???{timestamp_str} Roof Status: CLOSED"
+
+                    # Write the failsafe "CLOSED" status to the destination
+                    dest_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(dest_path, 'w', encoding='utf-8') as f:
+                        f.write(new_content)
+
+                except Exception as write_e:
+                    logging.error(f"Failed to write SUN_UP forced CLOSED status to {dest_path}: {write_e}")
+                    self.log_session_event("ROOF_STATUS_FAIL", "ERROR", f"Failed to write forced CLOSED status: {write_e}", {"destination": str(dest_path)})
+            # else: If sun is down, we do nothing and leave the last known good file at the destination.
+
+
     def _read_fits_header_data(self, file_path):
         details = {'file': str(file_path)}
         try:
@@ -285,6 +368,10 @@ class UnifiedAstroLogger:
             status_data.update(self._get_openweathermap_data())
             if status_data:
                 self.log_session_event("PERIODIC_STATUS", "INFO", "Periodic environment & time check.", status_data)
+
+            # Check roof status on each periodic cycle
+            self._check_roof_status()
+
         logging.info("Periodic logger thread finished.")
 
     def _file_monitor_thread(self, thread_name, directory_path_str, handler_class, wait_for_creation=False):
@@ -499,6 +586,12 @@ class ImageFileHandler(FileSystemEventHandler):
                 image_header = hdul[0].header
                 original_dtype = hdul[0].data.dtype
             
+            # Identify saturated pixels in the raw image BEFORE any calibration.
+            saturated_mask = image_data >= 65504
+            num_saturated = np.sum(saturated_mask)
+            if num_saturated > 0:
+                logging.info(f"Detected {num_saturated} saturated pixels (>=65504) in raw image {image_path.name}.")
+
             dark_data = fits.getdata(dark_path).astype(np.float32)
             flat_data = fits.getdata(flat_path).astype(np.float32)
 
@@ -514,6 +607,10 @@ class ImageFileHandler(FileSystemEventHandler):
             normalized_flat = flat_data / flat_mean
             
             calibrated_data = dark_subtracted / normalized_flat
+            
+            # After calibration, set the originally saturated pixels to 65535.
+            if num_saturated > 0:
+                calibrated_data[saturated_mask] = 65535
 
             info = np.iinfo(original_dtype)
             clipped_data = np.clip(calibrated_data, info.min, info.max).astype(original_dtype)
@@ -521,6 +618,9 @@ class ImageFileHandler(FileSystemEventHandler):
             image_header['CALSTAT'] = 'BDF'
             image_header.add_history(f"Calibrated with Dark: {dark_path.name}")
             image_header.add_history(f"Calibrated with Flat: {flat_path.name}")
+            image_header['OBSERVAT'] = ('SFRO', 'Starfront Remote Observatory, Rockwood, TX')
+            if num_saturated > 0:
+                image_header.add_history(f"Flagged {num_saturated} saturated pixels (>=65504) as 65535.")
             
             new_file_path = image_path.with_stem(f"{image_path.stem}_calibrated")
             fits.PrimaryHDU(data=clipped_data, header=image_header).writeto(new_file_path, overwrite=True)
