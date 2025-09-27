@@ -490,7 +490,7 @@ class ImageFileHandler(FileSystemEventHandler):
             self.logger.log_session_event("CALIBRATION_START", "INFO", "Searching for master calibration frames.", {"file": str(image_path)})
             
             dark_file = self.find_master_dark(fits_data)
-            flat_file = self.find_master_flat(fits_data.get('filter'))
+            flat_file = self.find_master_flat(fits_data.get('filter'), fits_data.get('camera_id'))
 
             if not dark_file or not flat_file:
                 self.logger.log_session_event("CALIBRATION_FAIL", "WARNING", "Could not find suitable master frames.", {"dark_found": str(dark_file), "flat_found": str(flat_file)})
@@ -511,6 +511,7 @@ class ImageFileHandler(FileSystemEventHandler):
         offset = fits_data.get('offset')
         ccd_temp = fits_data.get('ccd_temp')
         camera_id = fits_data.get('camera_id')
+        if not camera_id: logging.warning("No CAMERAID in light frame header, master dark selection may fail.")
         if not all([exposure, gain is not None, offset is not None, ccd_temp is not None, camera_id]):
             logging.warning("Missing header info for finding master dark.")
             return None
@@ -549,11 +550,14 @@ class ImageFileHandler(FileSystemEventHandler):
             logging.info(f"Found best dark match: {best_match} (Temp diff: {min_temp_diff:.2f}C)")
         return best_match
 
-    def find_master_flat(self, filter_val):
+    def find_master_flat(self, filter_val, camera_id=None):
         if not filter_val:
             logging.warning("No filter value in header, cannot find master flat.")
             return None
-            
+
+        if not camera_id:
+            logging.warning("No CAMERAID in light frame header, master flat selection may fail.")
+
         master_flat_dir = self.config.get("MASTER_FLAT_DIR")
         if not master_flat_dir or not master_flat_dir.exists():
             logging.warning("MASTER_FLAT_DIR is not configured or does not exist.")
@@ -564,8 +568,7 @@ class ImageFileHandler(FileSystemEventHandler):
                  try:
                     master_path = master_flat_dir / filename
                     master_header = fits.getheader(master_path)
-                    if (master_header.get('FILTER', '').upper() == filter_val.upper() and
-                        master_header.get('CAMERAID') == self.logger._read_fits_header_data(master_path).get('camera_id')):
+                    if (master_header.get('FILTER', '').upper() == filter_val.upper() and master_header.get('CAMERAID') == camera_id):
                         logging.info(f"Found master flat match: {master_path}")
                         return master_path
                  except Exception as e:
