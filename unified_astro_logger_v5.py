@@ -43,30 +43,126 @@ LOG_LEVELS = {'DEBUG': logging.DEBUG, 'INFO': logging.INFO, 'WARNING': logging.W
 log_level = LOG_LEVELS.get(os.getenv('LOGGING_LEVEL', 'INFO').upper(), logging.INFO)
 logging.basicConfig(level=log_level, format='%(asctime)s - %(threadName)s - %(levelname)s - %(message)s')
 
-# Camera-specific ROI offset lookup table
-# Based on empirical measurements using dark current pattern correlation
-CAMERA_ROI_OFFSETS = {
-    'ZWO ASI183MM Pro': {
-        'full_frame': (5496, 3672),
-        'roi_offsets': {
-            # Format: (width, height): (x_offset, y_offset)
-            # These are the actual measured top-left corner positions in the full frame
-            (2744, 1836): (1372, 918),  # 50% ROI - measured via correlation
-            (1368, 918): (2060, 1376),   # 25% ROI - measured via correlation
-        }
-    },
-    # Add other camera models here as needed
-    # 'ZWO ASI294MC Pro': {
-    #     'full_frame': (4144, 2822),
-    #     'roi_offsets': {
-    #         (2072, 1411): (1036, 705),  # Example 50% ROI - needs measurement
-    #     }
-    # },
-}
+
+# Camera-specific ROI offset functions
+def normalize_camera_name(camera_model):
+    """
+    Normalize camera model name for use in environment variable keys.
+    Replaces spaces with underscores and removes special characters.
+    
+    Parameters:
+    -----------
+    camera_model : str
+        Camera model identifier (e.g., 'ZWO ASI183MM Pro')
+    
+    Returns:
+    --------
+    str : Normalized camera name for environment variable keys
+    """
+    # Replace spaces with underscores and remove special characters
+    normalized = camera_model.upper()
+    normalized = normalized.replace(' ', '_')
+    normalized = ''.join(c if c.isalnum() or c == '_' else '' for c in normalized)
+    return normalized
+
+def load_camera_roi_offsets_from_env():
+    """
+    Load camera ROI offsets from environment variables.
+    
+    Returns:
+    --------
+    dict : Camera ROI offsets dictionary structure
+    """
+    camera_offsets = {}
+    
+    # Get all environment variables
+    env_vars = os.environ
+    
+    # Find all camera configurations
+    camera_prefixes = set()
+    for key in env_vars:
+        if key.startswith('CAMERA_') and '_FULL_FRAME_' in key:
+            # Extract camera name from the key
+            parts = key.split('_FULL_FRAME_')[0].split('CAMERA_')[1]
+            camera_prefixes.add(parts)
+    
+    for camera_prefix in camera_prefixes:
+        # Try to get full frame dimensions
+        width_key = f'CAMERA_{camera_prefix}_FULL_FRAME_WIDTH'
+        height_key = f'CAMERA_{camera_prefix}_FULL_FRAME_HEIGHT'
+        
+        if width_key in env_vars and height_key in env_vars:
+            try:
+                full_width = int(env_vars[width_key])
+                full_height = int(env_vars[height_key])
+                
+                # Initialize camera entry
+                camera_data = {
+                    'full_frame': (full_width, full_height),
+                    'roi_offsets': {}
+                }
+                
+                # Find all ROI offsets for this camera
+                roi_prefix = f'CAMERA_{camera_prefix}_ROI_'
+                roi_keys = [k for k in env_vars if k.startswith(roi_prefix)]
+                
+                # Group ROI keys by dimension
+                roi_dimensions = {}
+                for key in roi_keys:
+                    # Extract ROI dimensions from key
+                    # Format: CAMERA_{name}_ROI_{width}x{height}_{X|Y}_OFFSET
+                    parts = key.replace(roi_prefix, '').split('_')
+                    if len(parts) >= 2 and 'x' in parts[0]:
+                        roi_dim = parts[0]  # e.g., "2744x1836"
+                        coord = parts[1]     # "X" or "Y"
+                        
+                        if roi_dim not in roi_dimensions:
+                            roi_dimensions[roi_dim] = {}
+                        
+                        if coord == 'X':
+                            roi_dimensions[roi_dim]['x'] = int(env_vars[key])
+                        elif coord == 'Y':
+                            roi_dimensions[roi_dim]['y'] = int(env_vars[key])
+                
+                # Convert to the expected format
+                for roi_dim, offsets in roi_dimensions.items():
+                    if 'x' in offsets and 'y' in offsets:
+                        width, height = roi_dim.split('x')
+                        roi_key = (int(width), int(height))
+                        camera_data['roi_offsets'][roi_key] = (offsets['x'], offsets['y'])
+                
+                # Reconstruct original camera name (this is a best effort - may need adjustment)
+                # For now, we'll store it with the normalized name
+                camera_offsets[camera_prefix] = camera_data
+                
+                # Also try to map common camera names
+                if camera_prefix == 'ZWO_ASI183MM_PRO':
+                    camera_offsets['ZWO ASI183MM Pro'] = camera_data
+                elif camera_prefix == 'ZWO_ASI294MC_PRO':
+                    camera_offsets['ZWO ASI294MC Pro'] = camera_data
+                    
+                logging.info(f"Loaded ROI offsets for camera: {camera_prefix}")
+                
+            except (ValueError, KeyError) as e:
+                logging.warning(f"Error loading camera config for {camera_prefix}: {e}")
+    
+    return camera_offsets
+
+# Load camera ROI offsets from environment on module load
+CAMERA_ROI_OFFSETS = load_camera_roi_offsets_from_env()
+
+# Log loaded camera configurations
+if CAMERA_ROI_OFFSETS:
+    for camera, data in CAMERA_ROI_OFFSETS.items():
+        logging.info(f"Camera '{camera}' configured with full frame {data['full_frame']} and {len(data['roi_offsets'])} ROI offsets")
+else:
+    logging.warning("No camera ROI offsets loaded from environment variables. Will fall back to mathematical centering.")
 
 def get_roi_offset(camera_model, roi_width, roi_height, full_width, full_height):
     """
     Get the actual ROI offset for a specific camera model and ROI size.
+    First tries environment-configured offsets, then falls back to normalized name lookup,
+    then to mathematical centering.
     
     Parameters:
     -----------
@@ -82,7 +178,7 @@ def get_roi_offset(camera_model, roi_width, roi_height, full_width, full_height)
     tuple : (x_offset, y_offset)
         Actual top-left corner position of ROI in full frame
     """
-    # Try to find camera-specific offsets
+    # Try original camera model name first
     if camera_model in CAMERA_ROI_OFFSETS:
         camera_data = CAMERA_ROI_OFFSETS[camera_model]
         roi_key = (roi_width, roi_height)
@@ -91,10 +187,21 @@ def get_roi_offset(camera_model, roi_width, roi_height, full_width, full_height)
             x_offset, y_offset = camera_data['roi_offsets'][roi_key]
             logging.info(f"Using measured ROI offset for {camera_model} {roi_width}x{roi_height}: ({x_offset}, {y_offset})")
             return x_offset, y_offset
+    
+    # Try normalized camera name
+    normalized_name = normalize_camera_name(camera_model)
+    if normalized_name in CAMERA_ROI_OFFSETS:
+        camera_data = CAMERA_ROI_OFFSETS[normalized_name]
+        roi_key = (roi_width, roi_height)
+        
+        if roi_key in camera_data['roi_offsets']:
+            x_offset, y_offset = camera_data['roi_offsets'][roi_key]
+            logging.info(f"Using measured ROI offset for {camera_model} (normalized: {normalized_name}) {roi_width}x{roi_height}: ({x_offset}, {y_offset})")
+            return x_offset, y_offset
         else:
             logging.warning(f"No measured offset for {camera_model} ROI {roi_width}x{roi_height}. Falling back to mathematical centering.")
     else:
-        logging.warning(f"Camera model '{camera_model}' not in ROI offset table. Using mathematical centering.")
+        logging.warning(f"Camera model '{camera_model}' not in ROI offset configuration. Using mathematical centering.")
     
     # Fallback to mathematical centering
     x_offset = (full_width - roi_width) // 2
