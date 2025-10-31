@@ -7,7 +7,6 @@
 # - Full-featured, robust logger with API integration and real-time image processing.
 
 import os
-import sys
 import time
 import datetime
 import logging
@@ -21,8 +20,6 @@ from pathlib import Path
 # Third-Party Libraries
 from dotenv import load_dotenv
 import requests
-import win32com.client
-import pythoncom
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from astropy.io import fits
@@ -119,12 +116,37 @@ class UnifiedAstroLogger:
                     logging.warning(f"Could not parse camera ROI offset key '{key}': {e}")
             
     def _get_astronomical_date_str(self):
+        """
+        Get astronomical date string based on the previous noon local time.
+        Astronomical date changes at noon local time (not midnight).
+        Uses UTC as source to avoid DST transition issues, then converts to local time.
+        The date is determined by finding the most recent noon in local time.
+        
+        Examples:
+        - If current time is Nov 3rd, 3 PM -> previous noon is Nov 3rd, 12 PM -> date is Nov 3rd
+        - If current time is Nov 3rd, 11 AM -> previous noon is Nov 2nd, 12 PM -> date is Nov 2nd
+        
+        This ensures consistent behavior even during DST transitions at 2 AM.
+        """
         tz_str = self.tf.timezone_at(lat=self.config["LATITUDE"], lng=self.config["LONGITUDE"])
-        now_local = datetime.datetime.now(pytz.utc).astimezone(pytz.timezone(tz_str))
+        # Always start from UTC to avoid DST transition ambiguities
+        utc_now = datetime.datetime.now(pytz.utc)
+        local_tz = pytz.timezone(tz_str)
+        # Convert UTC to local time (pytz handles DST transitions correctly)
+        now_local = utc_now.astimezone(local_tz)
+        
+        # Calculate the most recent noon in local time
+        # If current time is before noon today, previous noon was yesterday
+        # If current time is noon or after, previous noon was today
         if now_local.hour < 12:
-            return (now_local - datetime.timedelta(days=1)).date().strftime('%Y-%m-%d')
+            # Before noon: previous noon was yesterday at 12:00 PM
+            previous_noon = now_local.replace(hour=12, minute=0, second=0, microsecond=0) - datetime.timedelta(days=1)
         else:
-            return now_local.date().strftime('%Y-%m-%d')
+            # At or after noon: previous noon was today at 12:00 PM
+            previous_noon = now_local.replace(hour=12, minute=0, second=0, microsecond=0)
+        
+        # Return the date of the previous noon
+        return previous_noon.date().strftime('%Y-%m-%d')
 
     def _resolve_dynamic_paths(self):
         logging.info("Resolving dynamic paths with astro_date: %s", self.astro_date_str)
@@ -323,9 +345,11 @@ class UnifiedAstroLogger:
                 
                 try:
                     # Construct the standard "CLOSED" content with the current local time
+                    # Always start from UTC to avoid DST transition ambiguities
                     tz_str = self.tf.timezone_at(lat=self.config["LATITUDE"], lng=self.config["LONGITUDE"])
                     local_tz = pytz.timezone(tz_str)
-                    now_local = datetime.datetime.now(pytz.utc).astimezone(local_tz)
+                    utc_now = datetime.datetime.now(pytz.utc)
+                    now_local = utc_now.astimezone(local_tz)
                     timestamp_str = now_local.strftime('%Y-%m-%d %I:%M:%S%p') # e.g., 2025-08-08 08:09:44AM
                     new_content = f"???{timestamp_str} Roof Status: CLOSED"
 
