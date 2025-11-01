@@ -103,7 +103,7 @@ class UnifiedAstroLogger:
                         # Find where ROI starts
                         roi_idx = next(i for i, p in enumerate(parts) if p == "ROI")
                         camera_name = "_".join(parts[1:roi_idx])
-                        roi_dim_str = parts[roi_idx + 1]  # e.g., "2744x1836"
+                        roi_dim_str = parts[roi_idx + 1].lower()  # Normalize to lowercase for consistent matching
                         axis = parts[-2]  # "X" or "Y"
                         
                         if camera_name not in self.config["CAMERA_ROI_OFFSETS"]:
@@ -642,7 +642,7 @@ class ImageFileHandler(FileSystemEventHandler):
             return None
         
         roi_offsets = self.config.get("CAMERA_ROI_OFFSETS", {})
-        roi_dim_str = f"{roi_width}x{roi_height}"
+        roi_dim_str = f"{roi_width}x{roi_height}".lower()  # Normalize to lowercase for consistent matching
         
         if not roi_offsets:
             logging.debug(f"No ROI offset configurations available. camera_id={camera_id}, roi={roi_dim_str}")
@@ -677,48 +677,48 @@ class ImageFileHandler(FileSystemEventHandler):
         for camera_name, rois in roi_offsets.items():
             camera_name_normalized = normalize_for_match(camera_name)
             
-            # Log matching attempt at INFO level for first camera to diagnose issues
-            if camera_name == list(roi_offsets.keys())[0]:
-                logging.info(f"Camera matching attempt: camera_id='{camera_id}' -> normalized='{camera_id_normalized}', config_name='{camera_name}' -> normalized='{camera_name_normalized}'")
-            
             # Try multiple matching strategies
             match_found = False
             
             # Strategy 1: Normalized names match exactly
             if camera_name_normalized == camera_id_normalized:
                 match_found = True
-                logging.info(f"Match found via Strategy 1 (exact normalized match): '{camera_name_normalized}' == '{camera_id_normalized}'")
             # Strategy 2: One normalized name contains the other (for partial matches)
             elif camera_name_normalized in camera_id_normalized or camera_id_normalized in camera_name_normalized:
                 match_found = True
-                logging.info(f"Match found via Strategy 2 (substring match): '{camera_name_normalized}' in '{camera_id_normalized}' or vice versa")
             # Strategy 3: Original format matching (after replacing separators with spaces)
             else:
                 camera_name_upper = camera_name.upper().replace("_", " ").replace("-", " ")
                 camera_id_spaced = camera_id_upper.replace("_", " ").replace("-", " ")
                 if camera_name_upper in camera_id_spaced or camera_id_spaced in camera_name_upper:
                     match_found = True
-                    logging.info(f"Match found via Strategy 3 (spaced format match): '{camera_name_upper}' in '{camera_id_spaced}' or vice versa")
             
             if match_found:
-                logging.info(f"Camera match found: '{camera_name}' matches '{camera_id}'. Checking for ROI '{roi_dim_str}'...")
+                # Try exact match first
                 if roi_dim_str in rois:
                     offsets = rois[roi_dim_str]
-                    x_offset = offsets.get("x")
-                    y_offset = offsets.get("y")
-                    logging.info(f"ROI '{roi_dim_str}' found in config. Offsets: x={x_offset}, y={y_offset}")
-                    if x_offset is not None and y_offset is not None:
-                        logging.info(f"Using configured ROI offsets for {camera_name} {roi_dim_str}: ({x_offset}, {y_offset})")
-                        return (x_offset, y_offset)
-                    else:
-                        logging.warning(f"Found camera match '{camera_name}' and ROI '{roi_dim_str}', but offsets incomplete: x={x_offset}, y={y_offset}")
                 else:
-                    logging.info(f"Camera match found for '{camera_name}', but ROI '{roi_dim_str}' not configured. Available ROIs: {list(rois.keys())}")
+                    # Fallback: case-insensitive lookup
+                    roi_dim_lower = roi_dim_str.lower()
+                    matching_key = next((k for k in rois.keys() if k.lower() == roi_dim_lower), None)
+                    if matching_key:
+                        offsets = rois[matching_key]
+                        logging.debug(f"ROI dimension case mismatch resolved: '{roi_dim_str}' matched '{matching_key}'")
+                    else:
+                        logging.info(f"Camera match found for '{camera_name}', but ROI '{roi_dim_str}' not configured. Available ROIs: {list(rois.keys())}")
+                        continue
+                
+                x_offset = offsets.get("x")
+                y_offset = offsets.get("y")
+                if x_offset is not None and y_offset is not None:
+                    logging.info(f"Using configured ROI offsets for {camera_name} {roi_dim_str}: ({x_offset}, {y_offset})")
+                    return (x_offset, y_offset)
+                else:
+                    logging.warning(f"Found camera match '{camera_name}' and ROI '{roi_dim_str}', but offsets incomplete: x={x_offset}, y={y_offset}")
         
-        # Log at INFO level with diagnostic information
+        # Log when no match found
         available_cameras = list(roi_offsets.keys())
-        logging.info(f"No configured ROI offsets found for camera_id='{camera_id}' (normalized: '{camera_id_normalized}'), roi={roi_dim_str}. Available cameras: {available_cameras}")
-        logging.debug(f"Camera ID matching details - Original: '{camera_id}', Upper: '{camera_id_upper}', Normalized: '{camera_id_normalized}'")
+        logging.info(f"No configured ROI offsets found for camera_id='{camera_id}', roi={roi_dim_str}. Available cameras: {available_cameras}")
         return None
 
     def calibrate_image(self, image_path, dark_path, flat_path):
