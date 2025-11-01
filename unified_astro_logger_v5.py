@@ -677,9 +677,9 @@ class ImageFileHandler(FileSystemEventHandler):
         for camera_name, rois in roi_offsets.items():
             camera_name_normalized = normalize_for_match(camera_name)
             
-            # Debug logging for first camera to diagnose matching issues
+            # Log matching attempt at INFO level for first camera to diagnose issues
             if camera_name == list(roi_offsets.keys())[0]:
-                logging.debug(f"Camera matching: camera_id='{camera_id}' -> normalized='{camera_id_normalized}', config_name='{camera_name}' -> normalized='{camera_name_normalized}'")
+                logging.info(f"Camera matching attempt: camera_id='{camera_id}' -> normalized='{camera_id_normalized}', config_name='{camera_name}' -> normalized='{camera_name_normalized}'")
             
             # Try multiple matching strategies
             match_found = False
@@ -687,18 +687,18 @@ class ImageFileHandler(FileSystemEventHandler):
             # Strategy 1: Normalized names match exactly
             if camera_name_normalized == camera_id_normalized:
                 match_found = True
-                logging.debug(f"Match found via Strategy 1 (exact normalized match): '{camera_name_normalized}' == '{camera_id_normalized}'")
+                logging.info(f"Match found via Strategy 1 (exact normalized match): '{camera_name_normalized}' == '{camera_id_normalized}'")
             # Strategy 2: One normalized name contains the other (for partial matches)
             elif camera_name_normalized in camera_id_normalized or camera_id_normalized in camera_name_normalized:
                 match_found = True
-                logging.debug(f"Match found via Strategy 2 (substring match): '{camera_name_normalized}' in '{camera_id_normalized}' or vice versa")
+                logging.info(f"Match found via Strategy 2 (substring match): '{camera_name_normalized}' in '{camera_id_normalized}' or vice versa")
             # Strategy 3: Original format matching (after replacing separators with spaces)
             else:
                 camera_name_upper = camera_name.upper().replace("_", " ").replace("-", " ")
                 camera_id_spaced = camera_id_upper.replace("_", " ").replace("-", " ")
                 if camera_name_upper in camera_id_spaced or camera_id_spaced in camera_name_upper:
                     match_found = True
-                    logging.debug(f"Match found via Strategy 3 (spaced format match): '{camera_name_upper}' in '{camera_id_spaced}' or vice versa")
+                    logging.info(f"Match found via Strategy 3 (spaced format match): '{camera_name_upper}' in '{camera_id_spaced}' or vice versa")
             
             if match_found:
                 if roi_dim_str in rois:
