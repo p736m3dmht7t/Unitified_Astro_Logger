@@ -156,7 +156,7 @@ class UnifiedAstroLogger:
         return previous_noon.date().strftime('%Y-%m-%d')
 
     def _resolve_dynamic_paths(self):
-        logging.info("Resolving dynamic paths with astro_date: %s", self.astro_date_str)
+        logging.debug("Resolving dynamic paths with astro_date: %s", self.astro_date_str)
         for key in ["SESSION_LOG_DIR", "IMAGE_BASE_DIR"]:
             if self.config[key] and "{astro_date}" in self.config[key]:
                 self.config[key] = self.config[key].format(astro_date=self.astro_date_str)
@@ -177,7 +177,7 @@ class UnifiedAstroLogger:
                 with open(file_path, 'w', newline='', encoding='utf-8') as f:
                     writer = csv.writer(f)
                     writer.writerow(headers)
-                logging.info(f"Created new log file with headers: {file_path}")
+                logging.debug(f"Created new log file with headers: {file_path}")
 
     def _write_to_csv(self, file_path, row, lock):
         with lock:
@@ -246,7 +246,7 @@ class UnifiedAstroLogger:
                     logging.warning("Could not find Dew Port 1 power in Pegasus PPBA response.")
             
             if self.pegasus_api_is_down:
-                logging.info("Successfully re-established connection to Pegasus API.")
+                logging.debug("Successfully re-established connection to Pegasus API.")
                 self.pegasus_api_is_down = False
             return all_pegasus_data
             
@@ -403,7 +403,7 @@ class UnifiedAstroLogger:
 
     def _periodic_logger_thread(self):
         threading.current_thread().name = "PeriodicLogger"
-        logging.info("Periodic logger thread started.")
+        logging.debug("Periodic logger thread started.")
         while not self.shutdown_event.wait(self.config["PERIODIC_LOG_INTERVAL_SEC"]):
             status_data = {}
             status_data.update(self._get_pegasus_data())
@@ -416,7 +416,7 @@ class UnifiedAstroLogger:
             # Check roof status on each periodic cycle
             self._check_roof_status()
 
-        logging.info("Periodic logger thread finished.")
+        logging.debug("Periodic logger thread finished.")
 
     def _file_monitor_thread(self, thread_name, directory_path_str, handler_class, wait_for_creation=False):
         threading.current_thread().name = thread_name
@@ -426,12 +426,12 @@ class UnifiedAstroLogger:
             return
 
         if wait_for_creation:
-            logging.info(f"Waiting for directory to be created: {path}")
+            logging.debug(f"Waiting for directory to be created: {path}")
             while not path.exists():
                 if self.shutdown_event.wait(timeout=15):
-                    logging.info(f"Shutdown signal received while waiting for {path}. Exiting thread.")
+                    logging.debug(f"Shutdown signal received while waiting for {path}. Exiting thread.")
                     return
-            logging.info(f"Directory found: {path}. Initializing monitor.")
+            logging.debug(f"Directory found: {path}. Initializing monitor.")
         elif not path.exists():
             logging.error(f"Directory does not exist and not waiting: {path}. Exiting thread.")
             return
@@ -443,7 +443,7 @@ class UnifiedAstroLogger:
         self.shutdown_event.wait()
         observer.stop()
         observer.join()
-        logging.info(f"{thread_name} finished.")
+        logging.debug(f"{thread_name} finished.")
 
     def _input_monitor_thread(self):
         threading.current_thread().name = "InputMonitor"
@@ -465,13 +465,13 @@ class UnifiedAstroLogger:
             logging.debug("SHUTDOWN_FLAG_FILE not configured. External shutdown monitor thread will not run.")
             return
 
-        logging.info(f"External shutdown monitor started. Watching for: {flag_file_path}")
+        logging.debug(f"External shutdown monitor started. Watching for: {flag_file_path}")
         while not self.shutdown_event.is_set():
             if flag_file_path.exists():
                 logging.info(f"Shutdown flag file found at {flag_file_path}. Initiating shutdown.")
                 try:
                     flag_file_path.unlink() # Delete the file to prevent re-triggering
-                    logging.info("Shutdown flag file removed.")
+                    logging.debug("Shutdown flag file removed.")
                 except OSError as e:
                     logging.error(f"Could not remove shutdown flag file {flag_file_path}: {e}")
                 
@@ -482,7 +482,7 @@ class UnifiedAstroLogger:
             if self.shutdown_event.wait(timeout=2):
                 break
                 
-        logging.info("External shutdown monitor thread finished.")
+        logging.debug("External shutdown monitor thread finished.")
 
     def start(self):
         input_thread = threading.Thread(target=self._input_monitor_thread, daemon=True)
@@ -511,7 +511,7 @@ class UnifiedAstroLogger:
         if not self.shutdown_event.is_set():
             self.shutdown_event.set()
             self.log_session_event("SESSION_END", "SUCCESS", "Logger shut down by user.", {})
-            logging.info("Shutdown signal sent.")
+            logging.debug("Shutdown signal sent.")
 
 class ImageFileHandler(FileSystemEventHandler):
     def __init__(self, logger):
@@ -705,7 +705,7 @@ class ImageFileHandler(FileSystemEventHandler):
                         offsets = rois[matching_key]
                         logging.debug(f"ROI dimension case mismatch resolved: '{roi_dim_str}' matched '{matching_key}'")
                     else:
-                        logging.info(f"Camera match found for '{camera_name}', but ROI '{roi_dim_str}' not configured. Available ROIs: {list(rois.keys())}")
+                        logging.debug(f"Camera match found for '{camera_name}', but ROI '{roi_dim_str}' not configured. Available ROIs: {list(rois.keys())}")
                         continue
                 
                 x_offset = offsets.get("x")
@@ -718,7 +718,7 @@ class ImageFileHandler(FileSystemEventHandler):
         
         # Log when no match found
         available_cameras = list(roi_offsets.keys())
-        logging.info(f"No configured ROI offsets found for camera_id='{camera_id}', roi={roi_dim_str}. Available cameras: {available_cameras}")
+        logging.debug(f"No configured ROI offsets found for camera_id='{camera_id}', roi={roi_dim_str}. Available cameras: {available_cameras}")
         return None
 
     def calibrate_image(self, image_path, dark_path, flat_path):
@@ -734,7 +734,7 @@ class ImageFileHandler(FileSystemEventHandler):
             saturated_mask = image_data >= 65504
             num_saturated = np.sum(saturated_mask)
             if num_saturated > 0:
-                logging.info(f"Detected {num_saturated} saturated pixels (>=65504) in raw image {image_path.name}.")
+                logging.debug(f"Detected {num_saturated} saturated pixels (>=65504) in raw image {image_path.name}.")
 
             dark_data = fits.getdata(dark_path).astype(np.float32)
             flat_data = fits.getdata(flat_path).astype(np.float32)
@@ -770,19 +770,19 @@ class ImageFileHandler(FileSystemEventHandler):
                     x_offset_flat = configured_offsets[0]  # Same offsets for both dark and flat
                     y_offset_flat = configured_offsets[1]
                     using_configured_offsets = True
-                    logging.info(f"Using configured ROI offsets: ({x_offset_dark}, {y_offset_dark})")
+                    logging.debug(f"Using configured ROI offsets: ({x_offset_dark}, {y_offset_dark})")
                 else:
                     # Fall back to centered ROI assumption
                     x_offset_dark = (dark_naxis1 - image_naxis1) // 2
                     y_offset_dark = (dark_naxis2 - image_naxis2) // 2
                     x_offset_flat = (flat_naxis1 - image_naxis1) // 2
                     y_offset_flat = (flat_naxis2 - image_naxis2) // 2
-                    logging.info(f"No configured offsets found, using centered ROI assumption: dark=({x_offset_dark}, {y_offset_dark}), flat=({x_offset_flat}, {y_offset_flat})")
+                    logging.debug(f"No configured offsets found, using centered ROI assumption: dark=({x_offset_dark}, {y_offset_dark}), flat=({x_offset_flat}, {y_offset_flat})")
 
                 try:
                     dark_data = dark_data[y_offset_dark:y_offset_dark + image_naxis2, x_offset_dark:x_offset_dark + image_naxis1]
                     flat_data = flat_data[y_offset_flat:y_offset_flat + image_naxis2, x_offset_flat:x_offset_flat + image_naxis1]
-                    logging.info(f"Cropped dark to {dark_data.shape}, flat to {flat_data.shape} for ROI calibration.")
+                    logging.debug(f"Cropped dark to {dark_data.shape}, flat to {flat_data.shape} for ROI calibration.")
                 except Exception as e:
                     self.logger.log_session_event("CALIBRATION_FAIL", "ERROR", f"Failed to crop master frames for ROI: {e}", {
                         "image_shape": (image_naxis1, image_naxis2),
@@ -906,4 +906,4 @@ if __name__ == "__main__":
     except Exception as e:
         logging.critical(f"An unexpected critical error occurred: {e}", exc_info=True)
     finally:
-        logging.info("Main application has finished.")
+        logging.debug("Main application has finished.")
