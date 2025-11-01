@@ -701,17 +701,19 @@ class ImageFileHandler(FileSystemEventHandler):
                     logging.info(f"Match found via Strategy 3 (spaced format match): '{camera_name_upper}' in '{camera_id_spaced}' or vice versa")
             
             if match_found:
+                logging.info(f"Camera match found: '{camera_name}' matches '{camera_id}'. Checking for ROI '{roi_dim_str}'...")
                 if roi_dim_str in rois:
                     offsets = rois[roi_dim_str]
                     x_offset = offsets.get("x")
                     y_offset = offsets.get("y")
+                    logging.info(f"ROI '{roi_dim_str}' found in config. Offsets: x={x_offset}, y={y_offset}")
                     if x_offset is not None and y_offset is not None:
                         logging.info(f"Using configured ROI offsets for {camera_name} {roi_dim_str}: ({x_offset}, {y_offset})")
                         return (x_offset, y_offset)
                     else:
                         logging.warning(f"Found camera match '{camera_name}' and ROI '{roi_dim_str}', but offsets incomplete: x={x_offset}, y={y_offset}")
                 else:
-                    logging.debug(f"Found camera match '{camera_name}', but ROI '{roi_dim_str}' not configured. Available ROIs: {list(rois.keys())}")
+                    logging.info(f"Camera match found for '{camera_name}', but ROI '{roi_dim_str}' not configured. Available ROIs: {list(rois.keys())}")
         
         # Log at INFO level with diagnostic information
         available_cameras = list(roi_offsets.keys())
