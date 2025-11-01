@@ -114,6 +114,12 @@ class UnifiedAstroLogger:
                         logging.debug(f"Loaded ROI offset: {camera_name} {roi_dim_str} {axis}={value}")
                 except (ValueError, StopIteration, IndexError) as e:
                     logging.warning(f"Could not parse camera ROI offset key '{key}': {e}")
+        
+        # Log summary of loaded ROI offsets at startup
+        if self.config["CAMERA_ROI_OFFSETS"]:
+            total_configs = sum(len(rois) for rois in self.config["CAMERA_ROI_OFFSETS"].values())
+            camera_list = list(self.config["CAMERA_ROI_OFFSETS"].keys())
+            logging.info(f"Loaded {total_configs} ROI offset configuration(s) for {len(camera_list)} camera(s): {camera_list}")
             
     def _get_astronomical_date_str(self):
         """
@@ -631,20 +637,53 @@ class ImageFileHandler(FileSystemEventHandler):
         Falls back to centered ROI if no configuration found.
         """
         if not camera_id:
+            logging.debug("No camera_id provided, cannot lookup ROI offsets.")
             return None
         
         roi_offsets = self.config.get("CAMERA_ROI_OFFSETS", {})
         roi_dim_str = f"{roi_width}x{roi_height}"
         
+        if not roi_offsets:
+            logging.debug(f"No ROI offset configurations available. camera_id={camera_id}, roi={roi_dim_str}")
+            return None
+        
         # Try to match camera name in config
         # Camera IDs in FITS headers may have different formats, try common variations
-        camera_id_upper = camera_id.upper()
+        camera_id_upper = camera_id.upper().strip()
         
-        # Check for exact match first
+        # Normalize camera name for matching (remove spaces, dashes, underscores, common prefixes)
+        def normalize_for_match(name):
+            """Normalize camera name for flexible matching."""
+            normalized = name.upper().replace("_", "").replace("-", "").replace(" ", "")
+            # Remove common prefixes if present
+            for prefix in ["ZWO", "ASI", "CAMERA"]:
+                if normalized.startswith(prefix):
+                    normalized = normalized[len(prefix):]
+            return normalized
+        
+        camera_id_normalized = normalize_for_match(camera_id)
+        
+        # Check for match
         for camera_name, rois in roi_offsets.items():
-            camera_name_upper = camera_name.upper().replace("_", " ").replace("-", " ")
-            # Check if camera_id contains camera_name (flexible matching)
-            if camera_name_upper in camera_id_upper or camera_id_upper in camera_name_upper:
+            camera_name_normalized = normalize_for_match(camera_name)
+            
+            # Try multiple matching strategies
+            match_found = False
+            
+            # Strategy 1: Normalized names match exactly
+            if camera_name_normalized == camera_id_normalized:
+                match_found = True
+            # Strategy 2: One normalized name contains the other (for partial matches)
+            elif camera_name_normalized in camera_id_normalized or camera_id_normalized in camera_name_normalized:
+                match_found = True
+            # Strategy 3: Original format matching (after replacing separators with spaces)
+            else:
+                camera_name_upper = camera_name.upper().replace("_", " ").replace("-", " ")
+                camera_id_spaced = camera_id_upper.replace("_", " ").replace("-", " ")
+                if camera_name_upper in camera_id_spaced or camera_id_spaced in camera_name_upper:
+                    match_found = True
+            
+            if match_found:
                 if roi_dim_str in rois:
                     offsets = rois[roi_dim_str]
                     x_offset = offsets.get("x")
@@ -652,9 +691,15 @@ class ImageFileHandler(FileSystemEventHandler):
                     if x_offset is not None and y_offset is not None:
                         logging.info(f"Using configured ROI offsets for {camera_name} {roi_dim_str}: ({x_offset}, {y_offset})")
                         return (x_offset, y_offset)
-                    break
+                    else:
+                        logging.warning(f"Found camera match '{camera_name}' and ROI '{roi_dim_str}', but offsets incomplete: x={x_offset}, y={y_offset}")
+                else:
+                    logging.debug(f"Found camera match '{camera_name}', but ROI '{roi_dim_str}' not configured. Available ROIs: {list(rois.keys())}")
         
-        logging.debug(f"No configured ROI offsets found for camera_id={camera_id}, roi={roi_dim_str}. Will use centered ROI.")
+        # Log at INFO level with diagnostic information
+        available_cameras = list(roi_offsets.keys())
+        logging.info(f"No configured ROI offsets found for camera_id='{camera_id}' (normalized: '{camera_id_normalized}'), roi={roi_dim_str}. Available cameras: {available_cameras}")
+        logging.debug(f"Camera ID matching details - Original: '{camera_id}', Upper: '{camera_id_upper}', Normalized: '{camera_id_normalized}'")
         return None
 
     def calibrate_image(self, image_path, dark_path, flat_path):
