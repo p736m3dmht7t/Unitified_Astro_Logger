@@ -1,11 +1,14 @@
-# unified_astro_logger_v5.py (v18)
-#
-# Changelog:
-# - v18: Enhanced ROI calibration to use camera-specific measured offsets from .env configuration. Falls back to centered ROI assumption if offsets not configured. Supports CAMERA_{CAMERA_NAME}_ROI_{WIDTH}x{HEIGHT}_{X|Y}_OFFSET format.
-# - v17: Added support for calibrating Region of Interest (ROI) images where NAXIS1/NAXIS2 differ from master frames. Matches on CAMERAID, assumes centered ROI, crops master dark/flat to match light frame dimensions for pixel-accurate calibration.
-# - v16: Added robust roof status monitoring, Pegasus PPB Advance dew heater logging, external shutdown via flag file, and more (see previous changelog).
-# - Full-featured, robust logger with API integration and real-time image processing.
+# unified_astro_logger_v5.py: Automates observatory logging, calibration, and monitoring workflows
+# Sections:
+# - imports
+# - global_setup
+# - UnifiedAstroLogger
+# - ImageFileHandler
+# - NinaLogHandler
+# - main_entry
 
+# --- imports ---
+# Standard and third-party dependencies for logging, telemetry, and image calibration
 import os
 import time
 import datetime
@@ -18,7 +21,6 @@ import re
 import pytz
 from pathlib import Path
 
-# Third-Party Libraries
 from dotenv import load_dotenv
 import requests
 from watchdog.observers import Observer
@@ -32,12 +34,19 @@ from astropy.coordinates import EarthLocation
 from astropy.time import Time
 import astropy.units as u
 
+# --- global_setup ---
+# Configure logging verbosity from environment before creating application objects
+
 load_dotenv()
 LOG_LEVELS = {'DEBUG': logging.DEBUG, 'INFO': logging.INFO, 'WARNING': logging.WARNING, 'ERROR': logging.ERROR}
 log_level = LOG_LEVELS.get(os.getenv('LOGGING_LEVEL', 'INFO').upper(), logging.INFO)
 logging.basicConfig(level=log_level, format='%(asctime)s - %(threadName)s - %(levelname)s - %(message)s')
 
+# --- UnifiedAstroLogger ---
+# Coordinates observatory monitoring threads and event logging pipelines
 class UnifiedAstroLogger:
+    # --- __init__ ---
+    # Loads configuration, initializes observatory helpers, and prepares log files for this session
     def __init__(self):
         self.pegasus_api_is_down = False
         self.shutdown_event = threading.Event()
@@ -64,8 +73,9 @@ class UnifiedAstroLogger:
         clean_config = {k: str(v) for k, v in self.config.items() if "API_KEY" not in k}
         self.log_session_event("SESSION_START", "SUCCESS", "Logger started.", {"config": clean_config})
 
+    # --- _load_config ---
+    # Pulls environment configuration, validates required fields, and records ROI offsets
     def _load_config(self):
-        """Loads all configuration from environment variables with validation."""
         self.config = {}
         required_strings = ["SESSION_LOG_DIR", "FOCUS_LOG_FILE", "IMAGE_BASE_DIR", "OPENWEATHERMAP_API_KEY"]
         optional_strings = ["NINA_LOG_DIR", "BOLTWOOD_FILE_PATH", "MASTER_DARK_DIR", "MASTER_FLAT_DIR",
@@ -103,8 +113,10 @@ class UnifiedAstroLogger:
                         # Find where ROI starts
                         roi_idx = next(i for i, p in enumerate(parts) if p == "ROI")
                         camera_name = "_".join(parts[1:roi_idx])
-                        roi_dim_str = parts[roi_idx + 1].lower()  # Normalize to lowercase for consistent matching
-                        axis = parts[-2]  # "X" or "Y"
+                        # Normalize ROI dimensions to lowercase for consistent matching
+                        roi_dim_str = parts[roi_idx + 1].lower()
+                        # Determine which axis offset is being parsed
+                        axis = parts[-2]
                         
                         if camera_name not in self.config["CAMERA_ROI_OFFSETS"]:
                             self.config["CAMERA_ROI_OFFSETS"][camera_name] = {}
@@ -122,19 +134,9 @@ class UnifiedAstroLogger:
             camera_list = list(self.config["CAMERA_ROI_OFFSETS"].keys())
             logging.info(f"Loaded {total_configs} ROI offset configuration(s) for {len(camera_list)} camera(s): {camera_list}")
             
+    # --- _get_astronomical_date_str ---
+    # Derives the session date using the most recent local noon to remain stable across DST shifts
     def _get_astronomical_date_str(self):
-        """
-        Get astronomical date string based on the previous noon local time.
-        Astronomical date changes at noon local time (not midnight).
-        Uses UTC as source to avoid DST transition issues, then converts to local time.
-        The date is determined by finding the most recent noon in local time.
-        
-        Examples:
-        - If current time is Nov 3rd, 3 PM -> previous noon is Nov 3rd, 12 PM -> date is Nov 3rd
-        - If current time is Nov 3rd, 11 AM -> previous noon is Nov 2nd, 12 PM -> date is Nov 2nd
-        
-        This ensures consistent behavior even during DST transitions at 2 AM.
-        """
         tz_str = self.tf.timezone_at(lat=self.config["LATITUDE"], lng=self.config["LONGITUDE"])
         # Always start from UTC to avoid DST transition ambiguities
         utc_now = datetime.datetime.now(pytz.utc)
@@ -155,6 +157,8 @@ class UnifiedAstroLogger:
         # Return the date of the previous noon
         return previous_noon.date().strftime('%Y-%m-%d')
 
+    # --- _resolve_dynamic_paths ---
+    # Expands formatted paths and ensures required directories exist
     def _resolve_dynamic_paths(self):
         logging.debug("Resolving dynamic paths with astro_date: %s", self.astro_date_str)
         for key in ["SESSION_LOG_DIR", "IMAGE_BASE_DIR"]:
@@ -170,6 +174,8 @@ class UnifiedAstroLogger:
             if self.config.get(key):
                 self.config[key] = Path(self.config[key])
 
+    # --- _initialize_csv ---
+    # Creates CSV files with headers when missing or empty, using thread-safe access
     def _initialize_csv(self, file_path, headers, lock):
         with lock:
             if not file_path.exists() or file_path.stat().st_size == 0:
@@ -179,6 +185,8 @@ class UnifiedAstroLogger:
                     writer.writerow(headers)
                 logging.debug(f"Created new log file with headers: {file_path}")
 
+    # --- _write_to_csv ---
+    # Appends a row to the given CSV file while guarding against concurrent writes
     def _write_to_csv(self, file_path, row, lock):
         with lock:
             try:
@@ -187,11 +195,15 @@ class UnifiedAstroLogger:
             except Exception as e:
                 logging.error(f"FATAL: Could not write to CSV file {file_path}! {e}")
 
+    # --- log_session_event ---
+    # Records a session-level event with optional JSON-formatted detail payload
     def log_session_event(self, event_type, status, message, details_dict=None):
         details_json = json.dumps(details_dict, default=str) if details_dict else "{}"
         row = [datetime.datetime.now(pytz.utc).isoformat(), event_type, status, message, details_json]
         self._write_to_csv(self.config["SESSION_LOG_FILE"], row, self.session_csv_lock)
 
+    # --- log_focus_event ---
+    # Writes autofocus metrics to the focus CSV for downstream analysis
     def log_focus_event(self, focus_data):
         row = [
             datetime.datetime.now(pytz.utc).isoformat(),
@@ -206,6 +218,8 @@ class UnifiedAstroLogger:
         ]
         self._write_to_csv(self.config["FOCUS_LOG_FILE"], row, self.focus_csv_lock)
 
+    # --- _get_pegasus_data ---
+    # Retrieves telemetry from Pegasus devices with retry handling for transient network issues
     @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
     def _get_pegasus_data(self):
         try:
@@ -256,6 +270,8 @@ class UnifiedAstroLogger:
                 self.pegasus_api_is_down = True
             return {}
 
+    # --- _get_boltwood_data ---
+    # Reads the latest Boltwood cloud sensor line when the file is available
     def _get_boltwood_data(self):
         try:
             if self.config["BOLTWOOD_FILE_PATH"] and self.config["BOLTWOOD_FILE_PATH"].exists():
@@ -267,6 +283,8 @@ class UnifiedAstroLogger:
             logging.warning(f"Could not read Boltwood file: {e}")
         return {}
 
+    # --- _get_time_sync_status ---
+    # Parses Windows time synchronization output for logging
     def _get_time_sync_status(self):
         try:
             result = subprocess.run(['w32tm', '/query', '/status'], capture_output=True, text=True, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
@@ -284,6 +302,8 @@ class UnifiedAstroLogger:
             logging.warning(f"Could not check time sync: {e}")
             return {'time_sync_error': str(e)}
 
+    # --- _get_openweathermap_data ---
+    # Collects current conditions from OpenWeatherMap based on observatory coordinates
     @retry(stop=stop_after_attempt(3), wait=wait_fixed(5))
     def _get_openweathermap_data(self):
         params = {
@@ -310,13 +330,15 @@ class UnifiedAstroLogger:
             logging.warning(f"Could not get OpenWeatherMap data: {e}")
             return {}
 
+    # --- _check_roof_status ---
+    # Syncs roof status files and applies sun-based failsafe when the source is unavailable
     def _check_roof_status(self):
-        """Checks roof status, copies file, and applies failsafe logic if source is unavailable."""
         source_path = self.config.get("ROOF_STATUS_SOURCE_PATH")
         dest_path = self.config.get("ROOF_STATUS_DEST_PATH")
 
         if not source_path or not dest_path:
-            return  # Silently skip if not configured
+            # Silently skip when roof status paths are not provided
+            return
 
         try:
             # Attempt to read the source file from the network
@@ -357,7 +379,8 @@ class UnifiedAstroLogger:
                     local_tz = pytz.timezone(tz_str)
                     utc_now = datetime.datetime.now(pytz.utc)
                     now_local = utc_now.astimezone(local_tz)
-                    timestamp_str = now_local.strftime('%Y-%m-%d %I:%M:%S%p') # e.g., 2025-08-08 08:09:44AM
+                    # Format timestamp for the failsafe file entry (e.g., 2025-08-08 08:09:44AM)
+                    timestamp_str = now_local.strftime('%Y-%m-%d %I:%M:%S%p')
                     new_content = f"???{timestamp_str} Roof Status: CLOSED"
 
                     # Write the failsafe "CLOSED" status to the destination
@@ -370,11 +393,15 @@ class UnifiedAstroLogger:
                     self.log_session_event("ROOF_STATUS_FAIL", "ERROR", f"Failed to write forced CLOSED status: {write_e}", {"destination": str(dest_path)})
             # else: If sun is down, we do nothing and leave the last known good file at the destination.
 
+    # --- _read_fits_header_data ---
+    # Extracts key FITS header fields for logging and calibration decisions
     def _read_fits_header_data(self, file_path):
         details = {'file': str(file_path)}
         try:
             with fits.open(file_path) as hdul:
                 header = hdul[0].header
+                # --- get_keyword ---
+                # Returns the first matching FITS header value from the provided list
                 def get_keyword(keys):
                     return next((header[key] for key in keys if key in header), None)
                 details.update({
@@ -401,6 +428,8 @@ class UnifiedAstroLogger:
             details['fits_header_error'] = str(e)
         return details
 
+    # --- _periodic_logger_thread ---
+    # Runs on an interval to capture environment telemetry and roof status updates
     def _periodic_logger_thread(self):
         threading.current_thread().name = "PeriodicLogger"
         logging.debug("Periodic logger thread started.")
@@ -418,6 +447,8 @@ class UnifiedAstroLogger:
 
         logging.debug("Periodic logger thread finished.")
 
+    # --- _file_monitor_thread ---
+    # Watches a directory for new files and routes events to the provided handler
     def _file_monitor_thread(self, thread_name, directory_path_str, handler_class, wait_for_creation=False):
         threading.current_thread().name = thread_name
         path = Path(directory_path_str) if directory_path_str else None
@@ -445,6 +476,8 @@ class UnifiedAstroLogger:
         observer.join()
         logging.debug(f"{thread_name} finished.")
 
+    # --- _input_monitor_thread ---
+    # Monitors stdin for the shutdown key to allow graceful exit from console
     def _input_monitor_thread(self):
         threading.current_thread().name = "InputMonitor"
         while not self.shutdown_event.is_set():
@@ -457,6 +490,8 @@ class UnifiedAstroLogger:
             except EOFError:
                 break
 
+    # --- _shutdown_monitor_thread ---
+    # Polls for an external shutdown flag file and triggers shutdown when present
     def _shutdown_monitor_thread(self):
         threading.current_thread().name = "ShutdownMonitor"
         flag_file_path = self.config.get("SHUTDOWN_FLAG_FILE")
@@ -470,7 +505,8 @@ class UnifiedAstroLogger:
             if flag_file_path.exists():
                 logging.info(f"Shutdown flag file found at {flag_file_path}. Initiating shutdown.")
                 try:
-                    flag_file_path.unlink() # Delete the file to prevent re-triggering
+                    # Delete the flag file to prevent repeated shutdown triggers
+                    flag_file_path.unlink()
                     logging.debug("Shutdown flag file removed.")
                 except OSError as e:
                     logging.error(f"Could not remove shutdown flag file {flag_file_path}: {e}")
@@ -484,6 +520,8 @@ class UnifiedAstroLogger:
                 
         logging.debug("External shutdown monitor thread finished.")
 
+    # --- start ---
+    # Launches worker threads and blocks until they complete or shutdown is requested
     def start(self):
         input_thread = threading.Thread(target=self._input_monitor_thread, daemon=True)
         threads = [
@@ -507,18 +545,26 @@ class UnifiedAstroLogger:
              if not t.daemon and t.is_alive():
                  t.join()
 
+    # --- stop ---
+    # Signals all threads to stop and records the session end event
     def stop(self):
         if not self.shutdown_event.is_set():
             self.shutdown_event.set()
             self.log_session_event("SESSION_END", "SUCCESS", "Logger shut down by user.", {})
             logging.debug("Shutdown signal sent.")
 
+# --- ImageFileHandler ---
+# Handles new image files by calibrating and plate-solving them for logging
 class ImageFileHandler(FileSystemEventHandler):
+    # --- __init__ ---
+    # Stores shared logger references and prepares a set to avoid duplicate processing
     def __init__(self, logger):
         self.logger = logger
         self.config = logger.config
         self.processed = set()
 
+    # --- on_created ---
+    # Reacts to new FITS science frames while filtering out secondary outputs
     def on_created(self, event):
         if event.is_directory or self.logger.shutdown_event.is_set():
             return
@@ -535,6 +581,8 @@ class ImageFileHandler(FileSystemEventHandler):
         self.processed.add(str(path))
         self.process_image(path)
 
+    # --- process_image ---
+    # Coordinates FITS header extraction, calibration, and plate solving for a new frame
     def process_image(self, image_path):
         try:
             fits_data = self.logger._read_fits_header_data(image_path)
@@ -561,6 +609,8 @@ class ImageFileHandler(FileSystemEventHandler):
             logging.error(f"Unhandled error in processing pipeline for {image_path}: {e}", exc_info=True)
             self.logger.log_session_event("PROCESS_FAIL", "ERROR", f"Unhandled exception: {e}", {"file": str(image_path)})
 
+    # --- find_master_dark ---
+    # Selects the best dark frame that matches exposure, gain, offset, and temperature
     def find_master_dark(self, fits_data):
         exposure = fits_data.get('exposure')
         gain = fits_data.get('gain')
@@ -606,6 +656,8 @@ class ImageFileHandler(FileSystemEventHandler):
             logging.info(f"Found best dark match: {best_match} (Temp diff: {min_temp_diff:.2f}C)")
         return best_match
 
+    # --- find_master_flat ---
+    # Picks a master flat that matches the filter and camera identifier
     def find_master_flat(self, filter_val, camera_id=None):
         if not filter_val:
             logging.warning("No filter value in header, cannot find master flat.")
@@ -631,18 +683,16 @@ class ImageFileHandler(FileSystemEventHandler):
                      logging.warning(f"Could not process master flat {filename}: {e}")
         return None
 
+    # --- _get_roi_offsets ---
+    # Retrieves configured ROI offsets for a camera and falls back to centered cropping when absent
     def _get_roi_offsets(self, camera_id, roi_width, roi_height):
-        """
-        Get ROI offsets for a camera based on camera_id and ROI dimensions.
-        Returns (x_offset, y_offset) tuple, or None if not configured.
-        Falls back to centered ROI if no configuration found.
-        """
         if not camera_id:
             logging.debug("No camera_id provided, cannot lookup ROI offsets.")
             return None
         
         roi_offsets = self.config.get("CAMERA_ROI_OFFSETS", {})
-        roi_dim_str = f"{roi_width}x{roi_height}".lower()  # Normalize to lowercase for consistent matching
+        # Normalize ROI dimensions to lowercase for consistent matching
+        roi_dim_str = f"{roi_width}x{roi_height}".lower()
         
         if not roi_offsets:
             logging.debug(f"No ROI offset configurations available. camera_id={camera_id}, roi={roi_dim_str}")
@@ -652,23 +702,16 @@ class ImageFileHandler(FileSystemEventHandler):
         # Camera IDs in FITS headers may have different formats, try common variations
         camera_id_upper = camera_id.upper().strip()
         
-        # Normalize camera name for matching (remove spaces, dashes, underscores, common prefixes, camera numbers)
+        # --- normalize_for_match ---
+        # Harmonizes camera names across FITS headers and .env keys
         def normalize_for_match(name):
-            """
-            Normalize camera name for flexible matching.
-            Removes separators, common prefixes, and trailing camera number suffixes.
-            This is necessary because .env files can't contain '#' characters (used for comments),
-            so config names like 'ZWO_ASI183MM_PRO' need to match FITS headers like 'ZWO ASI183MM Pro #1'.
-            """
             normalized = name.upper().replace("_", "").replace("-", "").replace(" ", "")
             # Remove common prefixes if present
             for prefix in ["ZWO", "ASI", "CAMERA"]:
                 if normalized.startswith(prefix):
                     normalized = normalized[len(prefix):]
-            # Remove trailing camera number suffixes (e.g., "#1", "#2", " 1", " #1", etc.)
-            # This handles cases where FITS headers include camera numbers but .env configs don't
-            # because '#' can't be used in .env variable names (it's a comment character)
-            normalized = re.sub(r'[#\s]*\d+$', '', normalized)  # Remove trailing #N or N
+            # Strip trailing camera number suffixes (e.g., "#1") that cannot appear in .env keys
+            normalized = re.sub(r'[#\s]*\d+$', '', normalized)
             return normalized
         
         camera_id_normalized = normalize_for_match(camera_id)
@@ -721,6 +764,8 @@ class ImageFileHandler(FileSystemEventHandler):
         logging.debug(f"No configured ROI offsets found for camera_id='{camera_id}', roi={roi_dim_str}. Available cameras: {available_cameras}")
         return None
 
+    # --- calibrate_image ---
+    # Applies dark subtraction, flat normalization, and ROI cropping as needed
     def calibrate_image(self, image_path, dark_path, flat_path):
         try:
             with fits.open(image_path) as hdul:
@@ -767,7 +812,8 @@ class ImageFileHandler(FileSystemEventHandler):
                     # Use configured offsets (measured empirically)
                     x_offset_dark = configured_offsets[0]
                     y_offset_dark = configured_offsets[1]
-                    x_offset_flat = configured_offsets[0]  # Same offsets for both dark and flat
+                    # Use the same offsets for both dark and flat masters
+                    x_offset_flat = configured_offsets[0]
                     y_offset_flat = configured_offsets[1]
                     using_configured_offsets = True
                     logging.debug(f"Using configured ROI offsets: ({x_offset_dark}, {y_offset_dark})")
@@ -841,6 +887,8 @@ class ImageFileHandler(FileSystemEventHandler):
             self.logger.log_session_event("CALIBRATION_FAIL", "ERROR", f"Exception: {e}", {"file": str(image_path)})
             return None
 
+    # --- plate_solve_image ---
+    # Invokes ASTAP to write WCS information into the calibrated frame
     def plate_solve_image(self, calibrated_path):
         try:
             astap_cli = self.config.get("ASTAP_CLI_PATH")
@@ -850,14 +898,13 @@ class ImageFileHandler(FileSystemEventHandler):
 
             self.logger.log_session_event("PLATESOLVE_START", "INFO", "Attempting to plate-solve and write WCS to header.", {"file": str(calibrated_path)})
             
-            # The key change: Add the '-wcs' flag to the command.
-            # This tells ASTAP to update the FITS header of the input file directly.
+            # Request ASTAP to solve the field and write WCS metadata back to the calibrated file
             cmd = [str(astap_cli), "-f", str(calibrated_path), "-r 1", "-fov 1.44", "-z 2", "-sip", "-wcs", "-update"]
 
-            # We use check=True, so a CalledProcessError will be raised if ASTAP fails.
+            # Using check=True raises a CalledProcessError if ASTAP exits with a non-zero status
             result = subprocess.run(cmd, capture_output=True, text=True, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
 
-            # If the subprocess call completes without an exception, it was successful.
+            # Log the solve output when ASTAP reports success
             self.logger.log_session_event("PLATESOLVE_SUCCESS", "SUCCESS", "Plate-solving successful, WCS written directly to header.", {
                 "file": str(calibrated_path),
                 "astap_output": result.stdout.strip()
@@ -872,15 +919,26 @@ class ImageFileHandler(FileSystemEventHandler):
             logging.error(f"Error during plate-solving of {calibrated_path}: {e}", exc_info=True)
             self.logger.log_session_event("PLATESOLVE_FAIL", "ERROR", f"Exception: {e}", {"file": str(calibrated_path)})
 
+# --- NinaLogHandler ---
+# Captures autofocus results from N.I.N.A. output files and records focus metrics
 class NinaLogHandler(FileSystemEventHandler):
-    def __init__(self, logger): self.logger, self.config = logger, logger.config
+    # --- __init__ ---
+    # Stores the shared logger reference and configuration
+    def __init__(self, logger):
+        self.logger = logger
+        self.config = logger.config
+
+    # --- on_created ---
+    # Processes newly written autofocus result files from N.I.N.A.
     def on_created(self, event):
-        if event.is_directory or self.logger.shutdown_event.is_set(): return
+        if event.is_directory or self.logger.shutdown_event.is_set():
+            return
         if "final" in event.src_path.lower() and event.src_path.lower().endswith("detection_result.json"):
             path = Path(event.src_path)
             time.sleep(self.config["FILE_WRITE_DELAY_SEC"])
             try:
-                with open(path, 'r') as f: data = json.load(f)
+                with open(path, 'r') as f:
+                    data = json.load(f)
                 pegasus = self.logger._get_pegasus_data()
                 details = {
                     "focuser_position": data.get("FocuserPosition"),
@@ -889,7 +947,8 @@ class NinaLogHandler(FileSystemEventHandler):
                     "hfr_std_dev": data.get("HFRStdDev"),
                     "filter": data.get("Filter", "Unknown"),
                     "ambient_temp_c": pegasus.get('pegasus_temp_c'),
-                    "focuser_temp_c": None, # Cannot be known reliably at this point
+                    # Cannot be known reliably at this point in the autofocus workflow
+                    "focuser_temp_c": None,
                     "source_file": str(path)
                 }
                 self.logger.log_focus_event(details)
@@ -898,6 +957,8 @@ class NinaLogHandler(FileSystemEventHandler):
                 logging.error(f"Error processing NINA log {path}: {e}", exc_info=True)
                 self.logger.log_session_event("AUTOFOCUS_FAIL", "ERROR", f"Failed to parse NINA log: {e}", {"file": str(path)})
 
+# --- main_entry ---
+# Instantiates the logger and reports fatal startup failures
 if __name__ == "__main__":
     try:
         UnifiedAstroLogger().start()
