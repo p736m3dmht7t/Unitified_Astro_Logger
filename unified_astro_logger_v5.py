@@ -14,6 +14,7 @@ import subprocess
 import threading
 import csv
 import json
+import re
 import pytz
 from pathlib import Path
 
@@ -651,14 +652,23 @@ class ImageFileHandler(FileSystemEventHandler):
         # Camera IDs in FITS headers may have different formats, try common variations
         camera_id_upper = camera_id.upper().strip()
         
-        # Normalize camera name for matching (remove spaces, dashes, underscores, common prefixes)
+        # Normalize camera name for matching (remove spaces, dashes, underscores, common prefixes, camera numbers)
         def normalize_for_match(name):
-            """Normalize camera name for flexible matching."""
+            """
+            Normalize camera name for flexible matching.
+            Removes separators, common prefixes, and trailing camera number suffixes.
+            This is necessary because .env files can't contain '#' characters (used for comments),
+            so config names like 'ZWO_ASI183MM_PRO' need to match FITS headers like 'ZWO ASI183MM Pro #1'.
+            """
             normalized = name.upper().replace("_", "").replace("-", "").replace(" ", "")
             # Remove common prefixes if present
             for prefix in ["ZWO", "ASI", "CAMERA"]:
                 if normalized.startswith(prefix):
                     normalized = normalized[len(prefix):]
+            # Remove trailing camera number suffixes (e.g., "#1", "#2", " 1", " #1", etc.)
+            # This handles cases where FITS headers include camera numbers but .env configs don't
+            # because '#' can't be used in .env variable names (it's a comment character)
+            normalized = re.sub(r'[#\s]*\d+$', '', normalized)  # Remove trailing #N or N
             return normalized
         
         camera_id_normalized = normalize_for_match(camera_id)
