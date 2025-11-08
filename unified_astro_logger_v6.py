@@ -141,24 +141,32 @@ class UnifiedAstroLogger:
         if astap_binning_map:
             for entry in astap_binning_map.split(","):
                 try:
-                    height_str, zoom_str = entry.split("=")
+                    height_str, bin_str = entry.split("=")
                     height = int(height_str.strip())
-                    zoom = int(zoom_str.strip())
-                    if zoom < 0:
-                        raise ValueError("Zoom cannot be negative.")
-                    self.config["ASTAP_BINNING_MAP"][height] = zoom
+                    binning = int(bin_str.strip())
+                    if binning < 0:
+                        raise ValueError("Binning factor must be zero or a positive integer.")
+                    self.config["ASTAP_BINNING_MAP"][height] = binning
                 except ValueError as e:
                     logging.warning(f"Could not parse ASTAP_BINNING_MAP entry '{entry}': {e}")
         astap_binning_default = os.getenv("ASTAP_BINNING_DEFAULT")
         try:
-            self.config["ASTAP_BINNING_DEFAULT"] = int(astap_binning_default) if astap_binning_default is not None else None
+            default_binning = int(astap_binning_default) if astap_binning_default is not None else None
+            if default_binning is not None and default_binning < 0:
+                logging.debug(f"ASTAP_BINNING_DEFAULT '{default_binning}' is negative; -z will be omitted when no match found.")
+                default_binning = None
+            self.config["ASTAP_BINNING_DEFAULT"] = default_binning
         except ValueError:
             logging.warning(f"Invalid ASTAP_BINNING_DEFAULT '{astap_binning_default}'. Falling back to None.")
             self.config["ASTAP_BINNING_DEFAULT"] = None
         astap_fov_fallback = os.getenv("ASTAP_FOV_FALLBACK")
         if astap_fov_fallback is not None:
             try:
-                self.config["ASTAP_FOV_FALLBACK"] = float(astap_fov_fallback)
+                fallback_fov = float(astap_fov_fallback)
+                if fallback_fov < 0:
+                    logging.debug(f"ASTAP_FOV_FALLBACK '{fallback_fov}' is negative; -fov fallback will be disabled.")
+                    fallback_fov = None
+                self.config["ASTAP_FOV_FALLBACK"] = fallback_fov
             except ValueError:
                 logging.warning(f"Invalid ASTAP_FOV_FALLBACK '{astap_fov_fallback}'. Using default 1.44.")
                 self.config["ASTAP_FOV_FALLBACK"] = 1.44
@@ -839,7 +847,7 @@ class ImageFileHandler(FileSystemEventHandler):
             if focallen_val == 0:
                 logging.debug("FOCALLEN is zero; cannot compute ASTAP FOV.")
                 return None
-            fov = (ypixsz_val / focallen_val) * (180.0 / math.pi) / 1000.0 * (image_height_val / 2.0)
+            fov = (ypixsz_val / focallen_val) * (180.0 / math.pi) / 1000.0 * image_height_val
             if fov <= 0:
                 logging.debug(f"Computed non-positive ASTAP FOV ({fov}); skipping.")
                 return None
@@ -1000,12 +1008,15 @@ class ImageFileHandler(FileSystemEventHandler):
             cmd = [str(astap_cli), "-f", str(calibrated_path), "-r", "1"]
             if fov_value is not None:
                 cmd.extend(["-fov", f"{fov_value:.2f}"])
+                logging.debug(f"Using computed ASTAP FOV {fov_value:.4f} degrees for {calibrated_path.name}")
             else:
                 fallback_fov = self.config.get("ASTAP_FOV_FALLBACK")
                 if fallback_fov is not None:
                     cmd.extend(["-fov", f"{fallback_fov:.2f}"])
+                    logging.debug(f"Using fallback ASTAP FOV {fallback_fov:.4f} degrees for {calibrated_path.name}")
             if binning is not None:
                 cmd.extend(["-z", str(binning)])
+                logging.debug(f"Using ASTAP binning -z {binning} for {calibrated_path.name}")
             cmd.extend(["-sip", "-wcs", "-update"])
 
             # Using check=True raises a CalledProcessError if ASTAP exits with a non-zero status
