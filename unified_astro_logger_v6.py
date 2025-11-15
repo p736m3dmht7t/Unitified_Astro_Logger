@@ -1029,9 +1029,24 @@ class ImageFileHandler(FileSystemEventHandler):
             })
 
         except subprocess.CalledProcessError as e:
-            # This block executes if ASTAP returns a non-zero exit code (i.e., it failed).
-            logging.error(f"ASTAP failed for {calibrated_path}: {e.stderr}", exc_info=True)
-            self.logger.log_session_event("PLATESOLVE_FAIL", "ERROR", f"ASTAP failed: {e.stderr}", {"file": str(calibrated_path)})
+            # ASTAP exits with non-zero when it cannot solve (e.g., clouds or streaked stars).
+            stderr_msg = (e.stderr or "").strip()
+            stdout_msg = (e.stdout or "").strip()
+            failure_details = {
+                "file": str(calibrated_path),
+                "exit_code": e.returncode,
+                "astap_cmd": cmd,
+                "astap_stdout": stdout_msg,
+                "astap_stderr": stderr_msg
+            }
+            concise_msg = stderr_msg or stdout_msg or "ASTAP reported an error without additional output."
+            logging.warning(f"ASTAP plate-solve failed for {calibrated_path.name} (exit {e.returncode}): {concise_msg}")
+            self.logger.log_session_event(
+                "PLATESOLVE_FAIL",
+                "WARNING",
+                "ASTAP could not solve this frame (common in clouds or poor star detection).",
+                failure_details
+            )
         except Exception as e:
             # This block handles other potential errors (e.g., file not found).
             logging.error(f"Error during plate-solving of {calibrated_path}: {e}", exc_info=True)
